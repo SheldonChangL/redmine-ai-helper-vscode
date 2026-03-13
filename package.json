@@ -2,9 +2,9 @@
   "name": "redmine-ai-helper-vscode",
   "displayName": "Redmine AI Helper",
   "description": "Analyze workspace code against a Redmine issue and generate review notes or patch files with Codex, Claude, or Ollama.",
-  "version": "0.0.3",
-  "publisher": "local",
-  "private": true,
+  "version": "0.0.4",
+  "publisher": "sheldonchangl",
+  "author": "Sheldon Chang",
   "license": "ISC",
   "repository": {
     "type": "git",

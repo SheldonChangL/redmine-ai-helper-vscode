@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  release:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,10 +22,26 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Run tests
+        run: npm test
+
       - name: Package VSIX
         run: npx -y @vscode/vsce package
 
-      - name: Upload release asset
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: "*.vsix"
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            1. Download the `.vsix` file below.
+            2. In VS Code, open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+            3. Run **Extensions: Install from VSIX…** and select the downloaded file.
+
+      - name: Publish to Open VSX Registry
+        if: ${{ env.OVSX_TOKEN != '' }}
+        env:
+          OVSX_TOKEN: ${{ secrets.OVSX_TOKEN }}
+        run: npx -y ovsx publish *.vsix -p "$OVSX_TOKEN"

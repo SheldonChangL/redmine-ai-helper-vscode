@@ -4,6 +4,49 @@ const vscode = require('vscode');
 const { runTask } = require('./core');
 const { SidebarProvider } = require('./panel');
 
+const EXTENSION_VERSION = require('../package.json').version;
+const UPDATE_CHECK_KEY = 'redmineAiHelper.lastUpdateCheck';
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+async function checkForUpdates(context) {
+  const lastCheck = context.globalState.get(UPDATE_CHECK_KEY, 0);
+  if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL_MS) return;
+
+  try {
+    const response = await fetch(
+      'https://api.github.com/repos/SheldonChangL/redmine-ai-helper-vscode/releases/latest',
+      { headers: { 'User-Agent': 'redmine-ai-helper-vscode' } },
+    );
+    if (!response.ok) return;
+
+    const release = await response.json();
+    await context.globalState.update(UPDATE_CHECK_KEY, Date.now());
+
+    const latestVersion = String(release.tag_name || '').replace(/^v/, '');
+    if (!latestVersion || latestVersion === EXTENSION_VERSION) return;
+
+    // Numeric semver comparison
+    const cur = EXTENSION_VERSION.split('.').map(Number);
+    const lat = latestVersion.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if ((lat[i] || 0) > (cur[i] || 0)) {
+        const choice = await vscode.window.showInformationMessage(
+          `Redmine AI Helper v${latestVersion} is available (you have v${EXTENSION_VERSION}).`,
+          'Download',
+          'Dismiss',
+        );
+        if (choice === 'Download') {
+          vscode.env.openExternal(vscode.Uri.parse(release.html_url));
+        }
+        return;
+      }
+      if ((lat[i] || 0) < (cur[i] || 0)) return;
+    }
+  } catch {
+    // Network errors are silent
+  }
+}
+
 async function runCommand(context, outputChannel, options) {
   try {
     await runTask(context, outputChannel, options);
@@ -15,6 +58,9 @@ async function runCommand(context, outputChannel, options) {
 function activate(context) {
   const outputChannel = vscode.window.createOutputChannel('Redmine AI Helper');
   context.subscriptions.push(outputChannel);
+
+  // Check for updates in the background — non-blocking
+  checkForUpdates(context).catch(() => {});
 
   const sidebar = new SidebarProvider(context, {
     runFromPanel: (payload) => runTask(context, outputChannel, payload),
