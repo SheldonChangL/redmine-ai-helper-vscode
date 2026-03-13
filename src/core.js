@@ -706,5 +706,6 @@ module.exports = {
   saveConnection,
   fetchProjects,
   fetchMyIssues,
+  fetchIssue,
   runTask,
 };

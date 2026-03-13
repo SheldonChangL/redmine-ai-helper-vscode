@@ -9,6 +9,7 @@ const {
   saveConnection,
   fetchProjects,
   fetchMyIssues,
+  fetchIssue,
 } = require('./core');
 
 class SidebarProvider {
@@ -30,6 +31,7 @@ class SidebarProvider {
       selectedIssueId: '',
       projects: [],
       issues: [],
+      selectedIssue: null,
     };
   }
 
@@ -48,6 +50,10 @@ class SidebarProvider {
       }
       if (message.type === 'loadIssues') {
         await this.handleLoadIssues(message.payload);
+        return;
+      }
+      if (message.type === 'selectIssue') {
+        await this.handleSelectIssue(message.payload);
         return;
       }
       if (message.type === 'run') {
@@ -170,10 +176,24 @@ class SidebarProvider {
         issues,
         selectedProjectId: projectId,
         selectedIssueId,
+        selectedIssue: null,
       });
     } catch (error) {
       this.updateState({ busy: false, status: error.message, issues: [] });
       if (!silent) vscode.window.showErrorMessage(error.message);
+    }
+  }
+
+  async handleSelectIssue(payload) {
+    const issueId = String(payload.selectedIssueId || '').trim();
+    this.updateState({ selectedIssueId: issueId, selectedIssue: null });
+    if (!issueId) return;
+    try {
+      const connection = await this.persistConnection(payload);
+      const issue = await fetchIssue(this.context, issueId, connection);
+      this.updateState({ selectedIssue: issue });
+    } catch {
+      // issue detail is non-critical; silently skip
     }
   }
 
@@ -318,6 +338,49 @@ class SidebarProvider {
     .checkbox input {
       width: auto;
     }
+    .issue-detail {
+      display: none;
+      flex-direction: column;
+      gap: 6px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-widget-border, transparent);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .issue-detail.visible {
+      display: flex;
+    }
+    .issue-detail-description {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .issue-detail-meta {
+      color: var(--vscode-descriptionForeground);
+    }
+    .issue-journals {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border-top: 1px solid var(--vscode-widget-border, transparent);
+      padding-top: 6px;
+      margin-top: 2px;
+    }
+    .journal-entry {
+      background: var(--vscode-input-background);
+      border-radius: 4px;
+      padding: 6px 8px;
+    }
+    .journal-meta {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground);
+      margin-bottom: 4px;
+    }
+    .journal-notes {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
   </style>
 </head>
 <body>
@@ -352,6 +415,12 @@ class SidebarProvider {
     <select id="issue">
       <option value="">Select an issue</option>
     </select>
+  </div>
+
+  <div id="issueDetail" class="issue-detail">
+    <div id="issueDetailMeta" class="issue-detail-meta"></div>
+    <div id="issueDetailDescription" class="issue-detail-description"></div>
+    <div id="issueJournals" class="issue-journals" style="display:none"></div>
   </div>
 
   <div class="block">
@@ -416,7 +485,8 @@ class SidebarProvider {
       selectedProjectId: '',
       selectedIssueId: '',
       projects: [],
-      issues: []
+      issues: [],
+      selectedIssue: null
     };
 
     const baseUrlEl = document.getElementById('baseUrl');
@@ -437,6 +507,41 @@ class SidebarProvider {
     const loadIssuesEl = document.getElementById('loadIssues');
     const settingsEl = document.getElementById('settings');
     const statusEl = document.getElementById('status');
+    const issueDetailEl = document.getElementById('issueDetail');
+    const issueDetailMetaEl = document.getElementById('issueDetailMeta');
+    const issueDetailDescriptionEl = document.getElementById('issueDetailDescription');
+    const issueJournalsEl = document.getElementById('issueJournals');
+
+    function escapeHtml(text) {
+      return String(text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function renderIssueDetail(issue) {
+      if (!issue) {
+        issueDetailEl.classList.remove('visible');
+        return;
+      }
+      const status = issue.status?.name || '?';
+      const priority = issue.priority?.name || '?';
+      const assignee = issue.assigned_to?.name || 'Unassigned';
+      issueDetailMetaEl.textContent = 'Status: ' + status + '  ·  Priority: ' + priority + '  ·  Assignee: ' + assignee;
+      issueDetailDescriptionEl.textContent = issue.description || '(no description)';
+
+      const journals = (issue.journals || []).filter((j) => j.notes && j.notes.trim());
+      if (journals.length > 0) {
+        issueJournalsEl.style.display = '';
+        issueJournalsEl.innerHTML = journals.map((j) => {
+          const author = escapeHtml(j.user?.name || 'Unknown');
+          const date = j.created_on ? new Date(j.created_on).toLocaleDateString() : '';
+          const notes = escapeHtml(j.notes);
+          return '<div class="journal-entry"><div class="journal-meta">' + author + (date ? ' · ' + date : '') + '</div><div class="journal-notes">' + notes + '</div></div>';
+        }).join('');
+      } else {
+        issueJournalsEl.style.display = 'none';
+        issueJournalsEl.innerHTML = '';
+      }
+      issueDetailEl.classList.add('visible');
+    }
 
     function syncVisibility() {
       codexModelBlockEl.style.display = backendEl.value === 'codex' ? '' : 'none';
@@ -506,6 +611,7 @@ class SidebarProvider {
         description: issue.updatedOn || ''
       }));
       statusEl.textContent = state.status || 'Ready.';
+      renderIssueDetail(state.selectedIssue || null);
       syncVisibility();
       setBusy(Boolean(state.busy));
       vscode.setState(state);
@@ -557,12 +663,17 @@ class SidebarProvider {
       applyState({
         selectedProjectId: projectEl.value,
         selectedIssueId: '',
-        issues: []
+        issues: [],
+        selectedIssue: null
       });
     });
 
     issueEl.addEventListener('change', () => {
-      applyState({ selectedIssueId: issueEl.value });
+      applyState({ selectedIssueId: issueEl.value, selectedIssue: null });
+      vscode.postMessage({
+        type: 'selectIssue',
+        payload: { ...collectPayload(), selectedIssueId: issueEl.value }
+      });
     });
 
     backendEl.addEventListener('change', syncVisibility);
