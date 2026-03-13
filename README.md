@@ -1,80 +1,126 @@
 # Redmine AI Helper for VS Code
 
-This extension runs the "Redmine issue + code analysis" flow directly inside VS Code and can apply code changes back into your workspace.
+> Connect Redmine issues to your code and let AI analyze or patch it — right inside VS Code.
+
+**Author:** Sheldon Chang
+**Publisher:** sheldonchangl
+**Version:** 0.0.4
+
+---
 
 ## Features
 
-- Activity-bar sidebar for entering Redmine URL, access token, project, issue, backend, scope, and trust mode
-- Load Redmine projects and list open issues assigned to `me`
-- Analyze the current file, current file folder, or the whole workspace
-- Explorer context-menu commands for a selected file or folder
-- Fetch Redmine issue details by ID
-- Scan local code context and send it to `codex`, `claude`, or `ollama`
-- Open analysis results in a markdown editor tab
-- Generate validated patches, preview them, and apply them into the workspace
-- Optional trusted mode to auto-apply validated changes without a confirmation step
+- **Sidebar UI** — enter Redmine URL, access token, project, and issue in one place
+- **Inline issue details** — view issue description, metadata, and journal comments directly in the sidebar after selecting an issue
+- **Automatic update notifications** — get notified when a new version is available (checks once per 24 h)
+- **Multiple AI backends** — supports Codex CLI, Claude CLI, and Ollama
+- **Flexible scope** — analyze the current file, current folder, or the entire workspace
+- **Explorer context menu** — right-click any file or folder to analyze or generate a patch
+- **Analysis mode** — opens AI review notes in a markdown editor tab
+- **Patch mode** — generates a unified diff, lets you accept or reject individual hunks, validates with `git apply --check`, then applies to your workspace
+- **Trust mode** — auto-applies validated patches without a confirmation step
+- **Post-apply summary** — shows which files changed after a patch is applied, with an "Open Changes" shortcut
+
+---
+
+## Installation
+
+### From GitHub Releases (recommended)
+
+1. Go to the [Releases page](https://github.com/SheldonChangL/redmine-ai-helper-vscode/releases).
+2. Download the latest `.vsix` file.
+3. In VS Code, open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`).
+4. Run **Extensions: Install from VSIX…** and select the downloaded file.
+
+### From Open VSX Registry
+
+Search for **Redmine AI Helper** on [open-vsx.org](https://open-vsx.org) once the extension is published there.
+
+---
+
+## Requirements
+
+At least one AI backend must be installed and accessible from your terminal:
+
+| Backend | Install |
+|---------|---------|
+| [Codex CLI](https://github.com/openai/codex) | `npm install -g @openai/codex` |
+| [Claude CLI](https://github.com/anthropics/claude-code) | `npm install -g @anthropic-ai/claude-code` |
+| [Ollama](https://ollama.com) | Download from ollama.com |
+
+The target workspace must be a **git repository** for patch application (`git apply` is used internally).
+
+---
+
+## Quick Start
+
+1. Click the **Redmine AI** icon in the Activity Bar.
+2. Enter your **Redmine Base URL** and **Access Token**, then click **Load Projects**.
+3. Select a project and click **Load My Issues**.
+4. Select an issue — its description and comments appear below the dropdown.
+5. Choose an **Analysis Scope** and **Backend**.
+6. Click **Analyze Only** for a review, or **Analyze + Change Code** to generate and apply a patch.
+
+---
 
 ## Commands
 
-- `Redmine AI: Focus Sidebar`
-- `Redmine AI: Analyze Workspace for Issue`
-- `Redmine AI: Generate Patch for Workspace`
-- `Redmine AI: Analyze Active File for Issue`
-- `Redmine AI: Generate Patch for Active File`
-- `Redmine AI: Analyze This File or Folder`
-- `Redmine AI: Generate Patch for This File or Folder`
+| Command | Description |
+|---------|-------------|
+| `Redmine AI: Focus Sidebar` | Open the sidebar panel |
+| `Redmine AI: Analyze Workspace for Issue` | Analyze the full workspace |
+| `Redmine AI: Generate Patch for Workspace` | Generate a patch for the full workspace |
+| `Redmine AI: Analyze Active File for Issue` | Analyze the currently open file |
+| `Redmine AI: Generate Patch for Active File` | Generate a patch for the active file |
+| `Redmine AI: Analyze This File or Folder` | Analyze a file/folder from the Explorer |
+| `Redmine AI: Generate Patch for This File or Folder` | Generate a patch from the Explorer |
 
-## Required Settings
+---
 
-The sidebar now lets you enter Redmine URL and access token directly. These settings still matter:
+## Settings
 
-- `redmineAiHelper.aiBackend`
-- `redmineAiHelper.codexModel` if you want to force a Codex model
-- `redmineAiHelper.ollamaModel` when using Ollama
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `redmineAiHelper.aiBackend` | `codex` | AI backend: `codex`, `claude`, or `ollama` |
+| `redmineAiHelper.codexModel` | _(empty)_ | Optional model override for Codex CLI (`-m`) |
+| `redmineAiHelper.ollamaModel` | `llama3.2` | Ollama model name |
+| `redmineAiHelper.maxFileBytes` | `51200` | Max size per file included in the AI prompt |
+| `redmineAiHelper.maxTotalBytes` | `204800` | Max total code context sent to the AI |
+| `redmineAiHelper.includeExtensions` | _(list)_ | File extensions to scan |
+| `redmineAiHelper.excludeDirectories` | _(list)_ | Directories to skip when scanning |
+
+---
+
+## Release Flow
+
+Push a version tag to trigger the CI/CD pipeline:
+
+```bash
+git tag v0.0.5
+git push origin v0.0.5
+```
+
+GitHub Actions will:
+1. Run all tests
+2. Package the `.vsix`
+3. Create a GitHub Release with the `.vsix` attached
+4. Publish to Open VSX Registry (if `OVSX_TOKEN` secret is configured)
+
+---
 
 ## Development
 
-1. Open this folder in VS Code.
-2. Press `F5` to start an Extension Development Host.
-3. In the new window, open a project you want to analyze.
-4. Use the `Redmine AI` activity-bar icon.
-5. Enter your Redmine base URL and access token.
-6. Load projects, then load your open issues for the selected project.
-7. Pick `Analyze Only` or `Analyze + Change Code`.
+1. Clone the repository and open it in VS Code.
+2. Press `F5` to launch an Extension Development Host.
+3. Open a git-tracked workspace in the new window.
+4. Use the **Redmine AI** sidebar to connect and run the extension.
+5. Run `npm test` to execute the unit test suite.
 
-## Install For Normal Users
-
-Use one of these two paths:
-
-1. Install a packaged `.vsix`
-   - Open VS Code
-   - Open `Extensions`
-   - Click `...`
-   - Choose `Install from VSIX...`
-   - Select the packaged `.vsix` file
-
-2. Install from a GitHub Release asset
-   - Download the `.vsix` file from the latest GitHub Release
-   - Use `Install from VSIX...` in VS Code
-
-## GitHub Release Flow
-
-The repository includes [release-vsix.yml](.github/workflows/release-vsix.yml), which packages the extension and uploads the `.vsix` to a GitHub Release whenever you push a tag like `v0.0.3`.
-
-Typical release flow:
-
-1. Put this extension project in its own GitHub repository
-2. Update `repository`, `homepage`, and `bugs` in [package.json](package.json)
-3. Commit changes
-4. Tag a release:
-   - `git tag v0.0.3`
-   - `git push origin v0.0.3`
-5. GitHub Actions will build the `.vsix` and attach it to the Release
+---
 
 ## Notes
 
-- The project uses plain JavaScript to avoid a build step.
-- Code-changing mode validates the generated patch with `git apply --check` before offering to apply it.
-- If trusted mode is off, the extension opens the patch preview and asks whether to apply it.
-- If the AI returns malformed patch text, or validation fails, the raw patch output is opened instead of modifying files.
-- The `repository`, `homepage`, and `bugs` URLs currently use placeholders and should be updated before publishing from your real GitHub repository.
+- Plain JavaScript — no build step required.
+- Patch validation uses `git apply --check` before any file is modified.
+- If the AI returns malformed output, the raw text is opened for inspection instead of touching files.
+- Hunk-by-hunk selection is available in non-trust mode: deselect individual hunks before applying.
