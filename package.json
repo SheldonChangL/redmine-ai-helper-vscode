@@ -1,0 +1,209 @@
+{
+  "name": "redmine-ai-helper-vscode",
+  "displayName": "Redmine AI Helper",
+  "description": "Analyze workspace code against a Redmine issue and generate review notes or patch files with Codex, Claude, or Ollama.",
+  "version": "0.0.3",
+  "publisher": "local",
+  "private": true,
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/redmine-ai-helper-vscode.git"
+  },
+  "homepage": "https://github.com/your-org/redmine-ai-helper-vscode",
+  "bugs": {
+    "url": "https://github.com/your-org/redmine-ai-helper-vscode/issues"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "files": [
+    "src/**",
+    "media/**",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "package": "npx -y @vscode/vsce package",
+    "package:release": "npx -y @vscode/vsce package --allow-missing-repository"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:redmineAiHelper.sidebar",
+    "onCommand:redmineAiHelper.openSidebar",
+    "onCommand:redmineAiHelper.analyzeIssue",
+    "onCommand:redmineAiHelper.generatePatch",
+    "onCommand:redmineAiHelper.analyzeActiveFile",
+    "onCommand:redmineAiHelper.generatePatchActiveFile",
+    "onCommand:redmineAiHelper.analyzeExplorerResource",
+    "onCommand:redmineAiHelper.generatePatchExplorerResource"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "redmineAiHelper",
+          "title": "Redmine AI",
+          "icon": "media/redmine-ai.svg"
+        }
+      ]
+    },
+    "views": {
+      "redmineAiHelper": [
+        {
+          "type": "webview",
+          "id": "redmineAiHelper.sidebar",
+          "name": "Assistant"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "redmineAiHelper.openSidebar",
+        "title": "Redmine AI: Focus Sidebar"
+      },
+      {
+        "command": "redmineAiHelper.analyzeIssue",
+        "title": "Redmine AI: Analyze Workspace for Issue"
+      },
+      {
+        "command": "redmineAiHelper.generatePatch",
+        "title": "Redmine AI: Generate Patch for Workspace"
+      },
+      {
+        "command": "redmineAiHelper.analyzeActiveFile",
+        "title": "Redmine AI: Analyze Active File for Issue"
+      },
+      {
+        "command": "redmineAiHelper.generatePatchActiveFile",
+        "title": "Redmine AI: Generate Patch for Active File"
+      },
+      {
+        "command": "redmineAiHelper.analyzeExplorerResource",
+        "title": "Redmine AI: Analyze This File or Folder"
+      },
+      {
+        "command": "redmineAiHelper.generatePatchExplorerResource",
+        "title": "Redmine AI: Generate Patch for This File or Folder"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "redmineAiHelper.analyzeExplorerResource",
+          "when": "explorerResourceIsFolder || resourceScheme == file",
+          "group": "navigation@50"
+        },
+        {
+          "command": "redmineAiHelper.generatePatchExplorerResource",
+          "when": "explorerResourceIsFolder || resourceScheme == file",
+          "group": "navigation@51"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Redmine AI Helper",
+      "properties": {
+        "redmineAiHelper.redmineBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Base URL of your Redmine instance, for example https://redmine.example.com."
+        },
+        "redmineAiHelper.redmineApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Redmine API key used to fetch issue details."
+        },
+        "redmineAiHelper.aiBackend": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "ollama"
+          ],
+          "default": "codex",
+          "description": "CLI backend used for analysis and patch generation."
+        },
+        "redmineAiHelper.codexModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model override passed to Codex CLI with -m."
+        },
+        "redmineAiHelper.ollamaModel": {
+          "type": "string",
+          "default": "llama3.2",
+          "description": "Ollama model name when aiBackend is set to ollama."
+        },
+        "redmineAiHelper.maxFileBytes": {
+          "type": "number",
+          "default": 51200,
+          "description": "Maximum size of a single file to include in the AI prompt."
+        },
+        "redmineAiHelper.maxTotalBytes": {
+          "type": "number",
+          "default": 204800,
+          "description": "Maximum total text size to include in the AI prompt across all files."
+        },
+        "redmineAiHelper.includeExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".js",
+            ".ts",
+            ".jsx",
+            ".tsx",
+            ".mjs",
+            ".cjs",
+            ".json",
+            ".css",
+            ".scss",
+            ".html",
+            ".md",
+            ".py",
+            ".rb",
+            ".go",
+            ".java",
+            ".kt",
+            ".swift",
+            ".php",
+            ".rs",
+            ".c",
+            ".h",
+            ".cpp",
+            ".cs",
+            ".yml",
+            ".yaml",
+            ".toml",
+            ".xml"
+          ],
+          "description": "File extensions to scan when collecting code context."
+        },
+        "redmineAiHelper.excludeDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".git",
+            "dist",
+            "build",
+            "coverage",
+            ".next",
+            "vendor",
+            "target",
+            ".idea",
+            ".gradle"
+          ],
+          "description": "Directory names to skip while scanning workspace files."
+        }
+      }
+    }
+  }
+}
