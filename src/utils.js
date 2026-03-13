@@ -196,6 +196,62 @@ function reconstructPatch(hunks) {
     .join('\n');
 }
 
+/**
+ * Apply a single hunk to an array of file lines (mutates lines in place).
+ * Uses fuzzy context matching with ±FUZZ line tolerance.
+ *
+ * @param {string[]} lines       File lines — mutated in place
+ * @param {{lines: string[]}} hunk  Hunk object; lines[0] is the @@ header
+ * @param {number} lineOffset    Running line-count offset from prior hunks
+ * @returns {{ ok: boolean, offset?: number, error?: string }}
+ */
+function applyHunkToLines(lines, hunk, lineOffset) {
+  const match = hunk.lines[0].match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+  if (!match) {
+    return { ok: false, error: `Invalid hunk header: ${hunk.lines[0]}` };
+  }
+
+  const hintLine = Math.max(0, parseInt(match[1], 10) - 1 + lineOffset); // 0-indexed
+
+  const ops = [];
+  for (const line of hunk.lines.slice(1)) {
+    if (line === '\\ No newline at end of file' || line === '') continue;
+    const type = line[0] === '+' ? 'add' : line[0] === '-' ? 'remove' : 'context';
+    ops.push({ type, content: line.slice(1) });
+  }
+
+  const beforeLines = ops
+    .filter((op) => op.type === 'context' || op.type === 'remove')
+    .map((op) => op.content);
+
+  // Fuzzy position search — try exact hint, then ±FUZZ lines
+  const FUZZ = 10;
+  let pos = -1;
+
+  outer: for (let delta = 0; delta <= FUZZ; delta++) {
+    for (const sign of (delta === 0 ? [0] : [1, -1])) {
+      const candidate = hintLine + delta * sign;
+      if (candidate < 0 || candidate + beforeLines.length > lines.length) continue;
+      if (beforeLines.every((bl, i) => lines[candidate + i] === bl)) {
+        pos = candidate;
+        break outer;
+      }
+    }
+  }
+
+  if (pos === -1) {
+    return { ok: false, error: `Could not find context for hunk at line ${match[1]}` };
+  }
+
+  const afterLines = ops
+    .filter((op) => op.type === 'context' || op.type === 'add')
+    .map((op) => op.content);
+
+  lines.splice(pos, beforeLines.length, ...afterLines);
+
+  return { ok: true, offset: afterLines.length - beforeLines.length };
+}
+
 module.exports = {
   sanitizePatchText,
   looksLikePatch,
@@ -205,4 +261,5 @@ module.exports = {
   parseChangedFiles,
   parseHunks,
   reconstructPatch,
+  applyHunkToLines,
 };

@@ -15,6 +15,7 @@ const {
   parseChangedFiles,
   parseHunks,
   reconstructPatch,
+  applyHunkToLines,
 } = require('./utils');
 
 const HOME = os.homedir();
@@ -524,6 +525,63 @@ function applyPatchToWorkspace(workspacePath, patchText, env) {
   return runGitApply(workspacePath, patchText, env, false);
 }
 
+/**
+ * Apply a unified diff patch by directly reading and writing files on disk.
+ * Does not require git. Uses fuzzy context matching so minor line-count
+ * inaccuracies in AI-generated patches are tolerated.
+ *
+ * @param {string} workspacePath
+ * @param {string} patchText
+ * @returns {{ ok: boolean, error?: string }}
+ */
+function applyPatchDirectly(workspacePath, patchText) {
+  const hunks = parseHunks(sanitizePatchText(patchText));
+
+  const fileHunks = new Map();
+  for (const hunk of hunks) {
+    if (!fileHunks.has(hunk.filePath)) fileHunks.set(hunk.filePath, []);
+    fileHunks.get(hunk.filePath).push(hunk);
+  }
+
+  const errors = [];
+
+  for (const [filePath, fileHunkList] of fileHunks) {
+    const absPath = path.join(workspacePath, filePath);
+
+    let raw = '';
+    try {
+      raw = fs.readFileSync(absPath, 'utf-8');
+    } catch {
+      // new file — start with empty content
+    }
+
+    const endsWithNewline = raw.endsWith('\n');
+    const lines = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    if (endsWithNewline && lines[lines.length - 1] === '') lines.pop();
+
+    let offset = 0;
+    for (const hunk of fileHunkList) {
+      const result = applyHunkToLines(lines, hunk, offset);
+      if (result.ok) {
+        offset += result.offset;
+      } else {
+        errors.push(`${filePath}: ${result.error}`);
+      }
+    }
+
+    try {
+      fs.mkdirSync(path.dirname(absPath), { recursive: true });
+      fs.writeFileSync(absPath, lines.join('\n') + (endsWithNewline ? '\n' : ''), 'utf-8');
+    } catch (err) {
+      errors.push(`${filePath}: write failed — ${err.message}`);
+    }
+  }
+
+  return errors.length > 0
+    ? { ok: false, error: errors.join('\n') }
+    : { ok: true };
+}
+
 async function showOutputDocument(content, language) {
   const doc = await vscode.workspace.openTextDocument({ content, language });
   await vscode.window.showTextDocument(doc, { preview: false });
@@ -582,7 +640,7 @@ async function showPostApplySummary(patchText, workspaceFolder) {
  * @param {Function} report
  * @returns {Promise<{applied: boolean, previewed: boolean}>}
  */
-async function hunkByHunkFlow(target, issueId, patchText, env, report) {
+async function hunkByHunkFlow(target, issueId, patchText, report) {
   const hunks = parseHunks(patchText);
 
   let selectedHunks;
@@ -622,40 +680,7 @@ async function hunkByHunkFlow(target, issueId, patchText, env, report) {
 
   const reconstructed = reconstructPatch(selectedHunks);
 
-  // Validate the reconstructed patch
-  const check = await checkPatchApplicability(target.workspaceFolder.uri.fsPath, reconstructed, env);
-  if (!check.ok) {
-    // Warn user: line number conflicts possible from deselecting middle hunks
-    const fallback = await vscode.window.showWarningMessage(
-      `Reconstructed patch validation failed: ${check.error}`,
-      'Apply All Hunks',
-      'Cancel',
-    );
-    if (fallback === 'Apply All Hunks') {
-      // Fall back to full original patch
-      await showOutputDocument(patchText, 'diff');
-      const confirm = await vscode.window.showInformationMessage(
-        `Apply full patch for Redmine #${issueId} to ${target.workspaceFolder.name}?`,
-        { modal: true },
-        'Apply',
-        'Cancel',
-      );
-      if (confirm !== 'Apply') {
-        report('Patch preview opened. Changes were not applied.');
-        return { applied: false, previewed: true };
-      }
-      report('Applying full patch to workspace…');
-      const applied = await applyPatchToWorkspace(target.workspaceFolder.uri.fsPath, patchText, env);
-      if (!applied.ok) {
-        throw new Error(`Failed to apply patch: ${applied.error}`);
-      }
-      return { applied: true, previewed: true };
-    }
-    report('Patch not applied due to validation failure.');
-    return { applied: false, previewed: false };
-  }
-
-  // Show reconstructed patch in diff editor
+  // Show patch preview
   await showOutputDocument(reconstructed, 'diff');
   const confirm = await vscode.window.showInformationMessage(
     `Apply selected hunks for Redmine #${issueId} to ${target.workspaceFolder.name}?`,
@@ -670,7 +695,7 @@ async function hunkByHunkFlow(target, issueId, patchText, env, report) {
   }
 
   report('Applying selected hunks to workspace…');
-  const applied = await applyPatchToWorkspace(target.workspaceFolder.uri.fsPath, reconstructed, env);
+  const applied = applyPatchDirectly(target.workspaceFolder.uri.fsPath, reconstructed);
   if (!applied.ok) {
     throw new Error(`Failed to apply patch: ${applied.error}`);
   }
@@ -678,12 +703,12 @@ async function hunkByHunkFlow(target, issueId, patchText, env, report) {
   return { applied: true, previewed: true };
 }
 
-async function maybeConfirmAndApplyPatch(target, issueId, patchText, autoApplyTrusted, env, report) {
+async function maybeConfirmAndApplyPatch(target, issueId, patchText, autoApplyTrusted, report) {
   const normalizedPatch = sanitizePatchText(patchText);
 
   if (autoApplyTrusted) {
     report('Trusted mode enabled. Applying patch directly…');
-    const applied = await applyPatchToWorkspace(target.workspaceFolder.uri.fsPath, normalizedPatch, env);
+    const applied = applyPatchDirectly(target.workspaceFolder.uri.fsPath, normalizedPatch);
     if (!applied.ok) {
       throw new Error(`Failed to apply patch: ${applied.error}`);
     }
@@ -692,7 +717,7 @@ async function maybeConfirmAndApplyPatch(target, issueId, patchText, autoApplyTr
   }
 
   // Non-trust mode: use hunk-by-hunk flow
-  const result = await hunkByHunkFlow(target, issueId, normalizedPatch, env, report);
+  const result = await hunkByHunkFlow(target, issueId, normalizedPatch, report);
   if (result.applied) {
     await showPostApplySummary(normalizedPatch, target.workspaceFolder);
   }
@@ -746,15 +771,6 @@ async function runTask(context, outputChannel, options) {
     update('Resolving analysis target…');
     const target = await resolveTarget(options.scope || 'activeFile', options.resourceUri);
 
-    // Issue #5: For patch actions, verify the workspace is a git repository
-    if (options.action === 'patch') {
-      if (!isGitRepository(target.workspaceFolder.uri.fsPath)) {
-        throw new Error(
-          'Workspace folder is not a git repository. Patch application requires git — initialise a git repo in your workspace first.',
-        );
-      }
-    }
-
     update('Fetching issue from Redmine…');
     const issue = await fetchIssue(context, issueId, {
       baseUrl: options.baseUrl,
@@ -788,14 +804,7 @@ async function runTask(context, outputChannel, options) {
         throw new Error('AI output did not look like a valid patch. The raw output has been opened for inspection.');
       }
 
-      update('Validating generated patch…');
-      const check = await checkPatchApplicability(target.workspaceFolder.uri.fsPath, output, env);
-      if (!check.ok) {
-        await showOutputDocument(sanitizePatchText(output), 'diff');
-        throw new Error(`Patch validation failed — the patch could not be applied cleanly: ${check.error}`);
-      }
-
-      const result = await maybeConfirmAndApplyPatch(target, issueId, output, autoApplyTrusted, env, report);
+      const result = await maybeConfirmAndApplyPatch(target, issueId, output, autoApplyTrusted, report);
       const success = result.applied
         ? `Patch applied for Redmine #${issueId}.`
         : `Patch generated for Redmine #${issueId}, but not applied.`;
