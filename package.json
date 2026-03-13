@@ -26,7 +26,8 @@
   ],
   "scripts": {
     "package": "npx -y @vscode/vsce package",
-    "package:release": "npx -y @vscode/vsce package --allow-missing-repository"
+    "package:release": "npx -y @vscode/vsce package --allow-missing-repository",
+    "test": "node --test test/utils.test.js"
   },
   "categories": [
     "Other"

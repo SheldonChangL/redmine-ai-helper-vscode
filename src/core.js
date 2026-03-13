@@ -6,6 +6,17 @@ const path = require('path');
 const { spawn } = require('child_process');
 const vscode = require('vscode');
 
+const {
+  sanitizePatchText,
+  looksLikePatch,
+  formatCodeFiles,
+  buildAnalysisPrompt,
+  buildPatchPrompt,
+  parseChangedFiles,
+  parseHunks,
+  reconstructPatch,
+} = require('./utils');
+
 const HOME = os.homedir();
 const LAST_ISSUE_ID_KEY = 'redmineAiHelper.lastIssueId';
 const LAST_PROJECT_ID_KEY = 'redmineAiHelper.lastProjectId';
@@ -102,6 +113,29 @@ function findBinary(backend, env) {
   const nvmHit = findBinaryInNvm(backend);
   if (nvmHit) return nvmHit;
   return backend;
+}
+
+/**
+ * Walk up the directory tree to detect whether dirPath is inside a git repository.
+ * @param {string} dirPath
+ * @returns {boolean}
+ */
+function isGitRepository(dirPath) {
+  let current = path.resolve(dirPath);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      const gitDir = path.join(current, '.git');
+      fs.accessSync(gitDir);
+      return true;
+    } catch {
+      // not found at this level
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break; // reached filesystem root
+    current = parent;
+  }
+  return false;
 }
 
 async function getStoredConnection(context) {
@@ -391,63 +425,6 @@ function collectCodeContext(target, options) {
   };
 }
 
-function formatCodeFiles(files) {
-  return files.map((file) => `=== ${file.path} ===\n${file.content}`).join('\n\n');
-}
-
-function buildAnalysisPrompt(issueText, codeText, truncated) {
-  const truncationNote = truncated ? '\n\nNote: code context was truncated to fit the prompt budget.' : '';
-  return [
-    'You are a senior software engineer.',
-    'Given the issue below and the relevant source files, analyze the root cause and suggest specific code changes to resolve the issue.',
-    'Reference file names where possible.',
-    '',
-    'Issue:',
-    issueText,
-    '',
-    'Source files:',
-    codeText,
-    truncationNote,
-  ].join('\n');
-}
-
-function buildPatchPrompt(issueText, codeText, truncated) {
-  const truncationNote = truncated
-    ? 'The code context was truncated, so avoid editing files that are not shown.'
-    : 'Use only the provided files when deciding what to change.';
-
-  return [
-    'You are a senior software engineer.',
-    'Given the issue below and the relevant source files, produce a unified diff patch that fixes the issue.',
-    'Requirements:',
-    '- Output only the patch content.',
-    '- Do not wrap the patch in markdown fences.',
-    '- Use standard unified diff format with --- and +++ headers.',
-    '- Include complete hunks with context lines.',
-    '- Make paths relative to the workspace root.',
-    `- ${truncationNote}`,
-    '',
-    'Issue:',
-    issueText,
-    '',
-    'Source files:',
-    codeText,
-  ].join('\n');
-}
-
-function sanitizePatchText(text) {
-  const trimmed = String(text || '').trim();
-  if (!trimmed) return '';
-
-  const fenced = trimmed.match(/^```(?:diff|patch)?\s*\n([\s\S]*?)\n```$/i);
-  return fenced ? fenced[1].trim() : trimmed;
-}
-
-function looksLikePatch(text) {
-  const normalized = sanitizePatchText(text);
-  return /(^diff --git\s)|(^---\s)|(^\+\+\+\s)|(^@@\s)/m.test(normalized);
-}
-
 function runBackend(prompt, backend, models, env) {
   const bin = findBinary(backend, env);
   let args;
@@ -560,6 +537,147 @@ function createStatusReporter(outputChannel, externalReporter) {
   };
 }
 
+/**
+ * Show a post-apply summary notification listing changed files,
+ * with an "Open Changes" button that opens each changed file's diff.
+ *
+ * @param {string} patchText
+ * @param {import('vscode').WorkspaceFolder} workspaceFolder
+ */
+async function showPostApplySummary(patchText, workspaceFolder) {
+  const changedFiles = parseChangedFiles(patchText);
+  const count = changedFiles.length;
+  const message = `Patch applied — ${count} file${count !== 1 ? 's' : ''} changed`;
+
+  const choice = await vscode.window.showInformationMessage(message, 'Open Changes');
+  if (choice !== 'Open Changes') return;
+
+  for (const relPath of changedFiles) {
+    const absPath = path.join(workspaceFolder.uri.fsPath, relPath);
+    const uri = vscode.Uri.file(absPath);
+    try {
+      await vscode.commands.executeCommand('git.openChange', uri);
+    } catch {
+      // Fallback: open the file directly
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+      } catch {
+        // If file doesn't exist or can't be opened, skip silently
+      }
+    }
+  }
+}
+
+/**
+ * Hunk-by-hunk patch flow (non-trust mode).
+ * Shows a QuickPick with all hunks pre-selected; user can deselect unwanted hunks.
+ * If only 1 hunk, skips picker and applies it directly.
+ * Validates reconstructed patch with git apply --check before showing diff + confirm.
+ *
+ * @param {object} target
+ * @param {number|string} issueId
+ * @param {string} patchText  already sanitized/normalized
+ * @param {object} env
+ * @param {Function} report
+ * @returns {Promise<{applied: boolean, previewed: boolean}>}
+ */
+async function hunkByHunkFlow(target, issueId, patchText, env, report) {
+  const hunks = parseHunks(patchText);
+
+  let selectedHunks;
+
+  if (hunks.length <= 1) {
+    // Only one hunk — skip picker, auto-select
+    selectedHunks = hunks;
+  } else {
+    // Build QuickPick items
+    const items = hunks.map((hunk, idx) => {
+      // Find the @@ header line
+      const hhLine = hunk.lines[0] || '';
+      // Get first 3-4 content lines after the @@ line
+      const contentLines = hunk.lines.slice(1, 5).join('\n');
+      return {
+        label: hunk.filePath || `hunk ${idx + 1}`,
+        description: hhLine,
+        detail: contentLines,
+        picked: true,
+        hunk,
+      };
+    });
+
+    const picked = await vscode.window.showQuickPick(items, {
+      canPickMany: true,
+      placeHolder: `Select hunks to apply for Redmine #${issueId} (all pre-selected)`,
+      title: 'Hunk Selection',
+    });
+
+    if (!picked || picked.length === 0) {
+      report('Hunk selection cancelled or no hunks selected.');
+      return { applied: false, previewed: false };
+    }
+
+    selectedHunks = picked.map((item) => item.hunk);
+  }
+
+  const reconstructed = reconstructPatch(selectedHunks);
+
+  // Validate the reconstructed patch
+  const check = await checkPatchApplicability(target.workspaceFolder.uri.fsPath, reconstructed, env);
+  if (!check.ok) {
+    // Warn user: line number conflicts possible from deselecting middle hunks
+    const fallback = await vscode.window.showWarningMessage(
+      `Reconstructed patch validation failed: ${check.error}`,
+      'Apply All Hunks',
+      'Cancel',
+    );
+    if (fallback === 'Apply All Hunks') {
+      // Fall back to full original patch
+      await showOutputDocument(patchText, 'diff');
+      const confirm = await vscode.window.showInformationMessage(
+        `Apply full patch for Redmine #${issueId} to ${target.workspaceFolder.name}?`,
+        { modal: true },
+        'Apply',
+        'Cancel',
+      );
+      if (confirm !== 'Apply') {
+        report('Patch preview opened. Changes were not applied.');
+        return { applied: false, previewed: true };
+      }
+      report('Applying full patch to workspace…');
+      const applied = await applyPatchToWorkspace(target.workspaceFolder.uri.fsPath, patchText, env);
+      if (!applied.ok) {
+        throw new Error(`Failed to apply patch: ${applied.error}`);
+      }
+      return { applied: true, previewed: true };
+    }
+    report('Patch not applied due to validation failure.');
+    return { applied: false, previewed: false };
+  }
+
+  // Show reconstructed patch in diff editor
+  await showOutputDocument(reconstructed, 'diff');
+  const confirm = await vscode.window.showInformationMessage(
+    `Apply selected hunks for Redmine #${issueId} to ${target.workspaceFolder.name}?`,
+    { modal: true },
+    'Apply',
+    'Cancel',
+  );
+
+  if (confirm !== 'Apply') {
+    report('Patch preview opened. Changes were not applied.');
+    return { applied: false, previewed: true };
+  }
+
+  report('Applying selected hunks to workspace…');
+  const applied = await applyPatchToWorkspace(target.workspaceFolder.uri.fsPath, reconstructed, env);
+  if (!applied.ok) {
+    throw new Error(`Failed to apply patch: ${applied.error}`);
+  }
+
+  return { applied: true, previewed: true };
+}
+
 async function maybeConfirmAndApplyPatch(target, issueId, patchText, autoApplyTrusted, env, report) {
   const normalizedPatch = sanitizePatchText(patchText);
 
@@ -569,29 +687,16 @@ async function maybeConfirmAndApplyPatch(target, issueId, patchText, autoApplyTr
     if (!applied.ok) {
       throw new Error(`Failed to apply patch: ${applied.error}`);
     }
+    await showPostApplySummary(normalizedPatch, target.workspaceFolder);
     return { applied: true, previewed: false };
   }
 
-  await showOutputDocument(normalizedPatch, 'diff');
-  const choice = await vscode.window.showInformationMessage(
-    `Apply generated patch for Redmine #${issueId} to ${target.workspaceFolder.name}?`,
-    { modal: true },
-    'Apply',
-    'Cancel',
-  );
-
-  if (choice !== 'Apply') {
-    report('Patch preview opened. Changes were not applied.');
-    return { applied: false, previewed: true };
+  // Non-trust mode: use hunk-by-hunk flow
+  const result = await hunkByHunkFlow(target, issueId, normalizedPatch, env, report);
+  if (result.applied) {
+    await showPostApplySummary(normalizedPatch, target.workspaceFolder);
   }
-
-  report('Applying approved patch to workspace…');
-  const applied = await applyPatchToWorkspace(target.workspaceFolder.uri.fsPath, normalizedPatch, env);
-  if (!applied.ok) {
-    throw new Error(`Failed to apply patch: ${applied.error}`);
-  }
-
-  return { applied: true, previewed: true };
+  return result;
 }
 
 async function runTask(context, outputChannel, options) {
@@ -641,6 +746,15 @@ async function runTask(context, outputChannel, options) {
     update('Resolving analysis target…');
     const target = await resolveTarget(options.scope || 'activeFile', options.resourceUri);
 
+    // Issue #5: For patch actions, verify the workspace is a git repository
+    if (options.action === 'patch') {
+      if (!isGitRepository(target.workspaceFolder.uri.fsPath)) {
+        throw new Error(
+          'Workspace folder is not a git repository. Patch application requires git — initialise a git repo in your workspace first.',
+        );
+      }
+    }
+
     update('Fetching issue from Redmine…');
     const issue = await fetchIssue(context, issueId, {
       baseUrl: options.baseUrl,
@@ -678,7 +792,7 @@ async function runTask(context, outputChannel, options) {
       const check = await checkPatchApplicability(target.workspaceFolder.uri.fsPath, output, env);
       if (!check.ok) {
         await showOutputDocument(sanitizePatchText(output), 'diff');
-        throw new Error(`Patch validation failed: ${check.error}`);
+        throw new Error(`Patch validation failed — the patch could not be applied cleanly: ${check.error}`);
       }
 
       const result = await maybeConfirmAndApplyPatch(target, issueId, output, autoApplyTrusted, env, report);
@@ -686,7 +800,6 @@ async function runTask(context, outputChannel, options) {
         ? `Patch applied for Redmine #${issueId}.`
         : `Patch generated for Redmine #${issueId}, but not applied.`;
       report(success);
-      vscode.window.showInformationMessage(success);
       return { issueId, target, output, ...result };
     }
 
@@ -708,4 +821,9 @@ module.exports = {
   fetchMyIssues,
   fetchIssue,
   runTask,
+  // New exports for issue #4, #5, #6, #7
+  isGitRepository,
+  parseChangedFiles,
+  parseHunks,
+  reconstructPatch,
 };
